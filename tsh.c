@@ -168,11 +168,14 @@ void eval(char *cmdline)
 	char *argv[MAXARGS];
 	int bin_funcnum;
 	int bg;
+	pid_t pid;
 
 	bg = parseline(cmdline, argv);
 
 	bin_funcnum = builtin_cmd(argv);
 
+
+	//When the cmd line command is built in command
 	switch(bin_funcnum){
 		case 1 :
 			exit(0);
@@ -186,9 +189,36 @@ void eval(char *cmdline)
 			break;
 	}
 
+	//Not the built in command 
+	//Then fork the program
+    pid = fork();
 
-	printf("%d\n", bin_funcnum);
-		
+    if (pid == -1) {
+        // Fork is failed
+        perror("fork");
+        exit(EXIT_FAILURE);
+    }
+    if (pid == 0) {
+        // In child process
+
+        // Create new process using execvp
+        execvp(argv[0], argv);
+
+        // When failed
+        perror("execvp");
+        exit(EXIT_FAILURE);
+    } else {
+        // In parent process
+
+        // Wait the child process is exit 
+        int status;
+        waitpid(pid, &status, 0);
+
+        if (!WIFEXITED(status)){
+			perror("waitpid");
+			exit(EXIT_FAILURE);
+		}
+    }
 
     return;
 }
