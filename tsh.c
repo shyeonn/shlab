@@ -38,7 +38,7 @@
 /* Global variables */
 extern char **environ;      /* defined in libc */
 char prompt[] = "tsh> ";    /* command line prompt (DO NOT CHANGE) */
-int verbose = 0;            /* if true, print additional output */
+int verbose = 1;            /* if true, print additional output */
 int nextjid = 1;            /* next job ID to allocate */
 char sbuf[MAXLINE];         /* for composing sprintf messages */
 
@@ -166,11 +166,13 @@ int main(int argc, char **argv)
 void eval(char *cmdline) 
 {
 	char *argv[MAXARGS];
+	char buf[MAXLINE];
 	int bin_funcnum;
 	int bg;
 	pid_t pid;
 
-	bg = parseline(cmdline, argv);
+	strcpy(buf, cmdline);
+	bg = parseline(buf, argv);
 
 	bin_funcnum = builtin_cmd(argv);
 
@@ -186,6 +188,7 @@ void eval(char *cmdline)
 			return;
 		case 4 :
 			listjobs(jobs);
+			return;
 			break;
 	}
 
@@ -207,16 +210,33 @@ void eval(char *cmdline)
         // When failed
         perror("execvp");
         exit(EXIT_FAILURE);
+
+
     } else {
         // In parent process
 
         // Wait the child process is exit 
-        int status;
-        waitpid(pid, &status, 0);
+		
+		//Foreground execute
+		if(!bg){
+			int status;
 
-        if (!WIFEXITED(status)){
-			perror("waitpid");
-			exit(EXIT_FAILURE);
+			//addjob(jobs, pid, FG, cmdline);
+
+			waitpid(pid, &status, 0);
+
+			if (!WIFEXITED(status)){
+				perror("waitpid");
+				exit(EXIT_FAILURE);
+			}
+		}
+		//Background execute
+		else{
+			int jid;
+
+			jid = addjob(jobs, pid, BG, cmdline); 
+
+			printf("[%d] (%d) %s", jid, pid, cmdline);
 		}
     }
 
@@ -336,7 +356,7 @@ void sigchld_handler(int sig)
  */
 void sigint_handler(int sig) 
 {
-    return;
+	return;
 }
 
 /*
