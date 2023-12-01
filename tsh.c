@@ -35,10 +35,18 @@
  * At most 1 job can be in the FG state.
  */
 
+#define DPRINT(fmt, ...) \
+    do { \
+        if (verbose) { \
+			printf("%s : ", __func__); \
+            printf(fmt, ##__VA_ARGS__); \
+        } \
+    } while(0)
+
 /* Global variables */
 extern char **environ;      /* defined in libc */
 char prompt[] = "tsh> ";    /* command line prompt (DO NOT CHANGE) */
-int verbose = 1;            /* if true, print additional output */
+int verbose = 0;            /* if true, print additional output */
 int nextjid = 1;            /* next job ID to allocate */
 char sbuf[MAXLINE];         /* for composing sprintf messages */
 
@@ -49,6 +57,10 @@ struct job_t {              /* The job struct */
     char cmdline[MAXLINE];  /* command line */
 };
 struct job_t jobs[MAXJOBS]; /* The job list */
+
+
+volatile sig_atomic_t exitFlag = 0;
+
 /* End global variables */
 
 
@@ -210,8 +222,6 @@ void eval(char *cmdline)
         // When failed
         perror("execvp");
         exit(EXIT_FAILURE);
-
-
     } else {
         // In parent process
 
@@ -219,16 +229,9 @@ void eval(char *cmdline)
 		
 		//Foreground execute
 		if(!bg){
-			int status;
+			addjob(jobs, pid, FG, cmdline); 
 
-			//addjob(jobs, pid, FG, cmdline);
-
-			waitpid(pid, &status, 0);
-
-			if (!WIFEXITED(status)){
-				perror("waitpid");
-				exit(EXIT_FAILURE);
-			}
+			waitfg(pid);
 		}
 		//Background execute
 		else{
@@ -330,6 +333,15 @@ void do_bgfg(char **argv)
  */
 void waitfg(pid_t pid)
 {
+	
+	do{
+		sleep(1);
+	}
+	while(getjobpid(jobs, pid));
+
+	DPRINT("Process (%d) no longer the fg process\n",  pid);
+
+
     return;
 }
 
@@ -346,6 +358,33 @@ void waitfg(pid_t pid)
  */
 void sigchld_handler(int sig) 
 {
+	DPRINT("entering\n");
+
+	int status;
+
+	pid_t child_pid = waitpid(-1, &status, WNOHANG|WUNTRACED);
+
+
+	if (child_pid > 0) {
+		int jid = pid2jid(child_pid);
+		if(deletejob(jobs, child_pid))
+			DPRINT("Job [%d] (%d) deleted\n", jid, child_pid);
+
+		if (WIFEXITED(status))
+			DPRINT("Job [%d] (%d) terminates OK (status %d)\n", jid, 
+					child_pid, WEXITSTATUS(status));
+		
+        if (WIFSIGNALED(status)) {
+            printf("Job [%d] (%d) terminated by signal: %d\n",
+					jid, child_pid, WTERMSIG(status));
+        } else if (WIFSTOPPED(status)) {
+            printf("Job [%d] (%d) stopped by signal: %d\n",
+					jid, child_pid, WSTOPSIG(status));
+		}
+	}
+
+	DPRINT("exiting\n");
+
     return;
 }
 
@@ -356,6 +395,24 @@ void sigchld_handler(int sig)
  */
 void sigint_handler(int sig) 
 {
+	int check_delete = 0;
+
+	DPRINT("entering\n");
+	
+
+	for(int i = 0; i < MAXJOBS; i++){
+		if(jobs[i].state == FG){
+			DPRINT("Job [%d] (%d) killed\n"
+					,jobs[i].jid, jobs[i].pid);
+
+			kill(jobs[i].pid, SIGINT);
+		}
+	}
+	if(check_delete)
+		exitFlag = sig;
+
+	DPRINT("exiting\n");
+
 	return;
 }
 
@@ -423,7 +480,7 @@ int addjob(struct job_t *jobs, pid_t pid, int state, char *cmdline)
   	    if(verbose){
 	        printf("Added job [%d] %d %s\n", jobs[i].jid, jobs[i].pid, jobs[i].cmdline);
             }
-            return 1;
+		return jobs[i].jid;
 	}
     }
     printf("Tried to create too many jobs\n");
@@ -503,23 +560,24 @@ void listjobs(struct job_t *jobs)
     int i;
     
     for (i = 0; i < MAXJOBS; i++) {
-	if (jobs[i].pid != 0) {
+	if ((jobs[i].pid != 0) && (jobs[i].state == BG)) {
 	    printf("[%d] (%d) ", jobs[i].jid, jobs[i].pid);
-	    switch (jobs[i].state) {
-		case BG: 
+//	    switch (jobs[i].state) {
+//		case BG: 
 		    printf("Running ");
-		    break;
-		case FG: 
-		    printf("Foreground ");
-		    break;
-		case ST: 
-		    printf("Stopped ");
-		    break;
-	    default:
-		    printf("listjobs: Internal error: job[%d].state=%d ", 
-			   i, jobs[i].state);
-	    }
-	    printf("%s", jobs[i].cmdline);
+			printf("%s", jobs[i].cmdline);
+//		    break;
+//		case FG: 
+//		    printf("Foreground ");
+//		    break;
+//		case ST: 
+//		    printf("Stopped ");
+//		    break;
+//	    default:
+//		    printf("listjobs: Internal error: job[%d].state=%d ", 
+//			   i, jobs[i].state);
+//    }
+//      printf("%s", jobs[i].cmdline);
 	}
     }
 }
