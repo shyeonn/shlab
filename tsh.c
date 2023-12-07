@@ -30,6 +30,15 @@
 #define BG 2    /* running in background */
 #define ST 3    /* stopped */
 
+//Use macro for formmatted output and verbose option
+#define DPRINT(fmt, ...) \
+    do { \
+        if (verbose) { \
+                       printf("%s: ", __func__); \
+            printf(fmt, ##__VA_ARGS__); \
+        } \
+    } while(0)
+
 /* 
  * Jobs states: FG (foreground), BG (background), ST (stopped)
  * Job state transitions and enabling actions:
@@ -39,30 +48,6 @@
  *     BG -> FG  : fg command
  * At most 1 job can be in the FG state.
  */
-
-#define DPRINT(fmt, ...) \
-    do { \
-        if (verbose) { \
-			printf("%s: ", __func__); \
-            printf(fmt, ##__VA_ARGS__); \
-        } \
-    } while(0)
-
-
-void safe_printf(const char *format, ...) {
-    char buffer[1024];  // Adjust the size as needed
-    int length;
-
-    va_list args;
-    va_start(args, format);
-    length = vsnprintf(buffer, sizeof(buffer), format, args);
-    va_end(args);
-
-    if (length >= 0 && (size_t)length < sizeof(buffer)) {
-        // Write the formatted message to the standard output
-        write(STDOUT_FILENO, buffer, length);
-    }
-}
 
 /* Global variables */
 extern char **environ;      /* defined in libc */
@@ -200,13 +185,16 @@ void eval(char *cmdline)
 	int bg;
 	pid_t pid;
 
+	//For signal mask
 	sigset_t mask, prev_mask;
-
+	
+	//For check bg/fg argument
     struct stat s_buffer;   
     int exist;
 
 	strcpy(buf, cmdline);
 
+	//No input in shell
 	if(strlen(buf) == 1)
 		return;
 
@@ -255,8 +243,10 @@ void eval(char *cmdline)
     }
     if (pid == 0) {
         // In child process
-
+		
+		// When create new child, set group id to new one 
 		setpgid(0, 0);
+
         // Create new process using execvp
         execvp(argv[0], argv);
 
@@ -266,14 +256,15 @@ void eval(char *cmdline)
     } 
 	else {
         // In parent process
-		
+
 		//Foreground execute
 		if(!bg){
-			
 			addjob(jobs, pid, FG, cmdline); 
 
+			//Bloking End
 			sigprocmask(SIG_SETMASK, &prev_mask, NULL);
 
+			//sigchld_handler can invoke from this position
 			waitfg(pid);
 		}
 		//Background execute
@@ -282,13 +273,13 @@ void eval(char *cmdline)
 			
 			jid = addjob(jobs, pid, BG, cmdline); 
 
+			//Bloking End
 			sigprocmask(SIG_SETMASK, &prev_mask, NULL);
 
+			//sigchld_handler can invoke from this position
 			printf("[%d] (%d) %s", jid, pid, cmdline);
 		}
-
     }
-
     return;
 }
 
@@ -356,6 +347,8 @@ int parseline(const char *cmdline, char **argv)
 int builtin_cmd(char **argv) 
 {
 	char *builtinp[4] = {"quit", "fg", "bg", "jobs"};
+
+	//Compare the four builtin command
 	for(int i = 0; i < 4; i++){
 		if(strcmp(builtinp[i], argv[0]) == 0)
 			return i+1;
@@ -371,28 +364,36 @@ void do_bgfg(char **argv)
 {
 	struct job_t *job;
 
+	//When the input has no argumant 
 	if(argv[1]==NULL){
 		printf("%s command requires PID or %%jobid argument\n",argv[0]);
 		return;
 	}
-	//JID
+	//Input argument is JID
 	else if(argv[1][0] == '%'){
 		char *endptr;
+		//Convert to integer and check the argument is only numbers
+		//[1][1] means to except % character
 		int jid = strtol(&argv[1][1], &endptr, 10);
+
 		if(endptr == &argv[1][1]){
 			printf("%s: argument must be a PID or %%jobid\n", argv[0]);
 			return;
 		}
+
 		job = getjobjid(jobs, jid);
 		if(job == NULL){
 			printf("%s: No such job\n", argv[1]);
 			return;
 		}
 	}
-	//PID
+	//Input argument is PID
 	else{
 		char *endptr;
+
+		//Convert to integer and check the argument is only numbers
 		int pid = strtol(argv[1], &endptr, 10);
+
 		if(endptr == argv[1]){
 			printf("%s: argument must be a PID or %%jobid\n", argv[0]);
 			return;
@@ -406,14 +407,19 @@ void do_bgfg(char **argv)
 	}
 	
 
+	//Check the command is bg or fg
 	if(strcmp(argv[0], "bg") == 0){
 		printf("[%d] (%d) %s", job->jid, job->pid, job->cmdline);
+		//Send SIGCONT signal
 		kill(-(job->pid), SIGCONT);
 		job->state = BG;
 	}
 	else{
 		job->state = FG;
+		//Send SIGCONT signal
 		kill(-(job->pid), SIGCONT);
+		//This because the current process wait
+		//And background process will be forground process
 		waitfg(job->pid);
 	}
     return;
@@ -425,12 +431,16 @@ void do_bgfg(char **argv)
 void waitfg(pid_t pid)
 {
 	struct job_t *job;
+
 	do{
+		//Wait some time 
 		sleep(1);
 		job = getjobpid(jobs, pid);
+		//When the job is deleted
 		if(job == NULL)
 			break;
 	}
+	//Check the job is no longer the fg process
 	while((job->state) == FG);
 
 	DPRINT("Process (%d) no longer the fg process\n",  pid);
@@ -455,12 +465,17 @@ void sigchld_handler(int sig)
 
 	int status;
 
+	//Find terminated or stopped child process
+	//Option means no hang on for not existing process
+	//and check the stopped process too
 	pid_t child_pid = waitpid(-1, &status, WNOHANG|WUNTRACED);
 
 
+	//When exist process
 	if (child_pid > 0) {
 		int jid = pid2jid(child_pid);
 
+		//Terminated
 		if(WIFEXITED(status) || WIFSIGNALED(status)){
 			if(deletejob(jobs, child_pid))
 				DPRINT("Job [%d] (%d) deleted\n", jid, child_pid);
@@ -472,14 +487,15 @@ void sigchld_handler(int sig)
 			if (WIFSIGNALED(status)) 
 				printf("Job [%d] (%d) terminated by signal %d\n",
 						jid, child_pid, WTERMSIG(status));
-
 		}
 
+		//Stopped 
         if (WIFSTOPPED(status)) {
 			struct job_t *job;
 			job = getjobpid(jobs, child_pid);
 
 			if(job){
+				//Change the state to ST
 				job->state = ST;
 				printf("Job [%d] (%d) stopped by signal %d\n",
 						jid, child_pid, WSTOPSIG(status));
@@ -504,6 +520,7 @@ void sigint_handler(int sig)
 	DPRINT("entering\n");
 	
 
+	//Find the FG process and terminate all process in proces group
 	for(int i = 0; i < MAXJOBS; i++){
 		if(jobs[i].state == FG){
 			DPRINT("Job [%d] (%d) killed\n"
@@ -527,6 +544,7 @@ void sigtstp_handler(int sig)
 {
 	DPRINT("entring\n");
 
+	//Find the FG process and stop all process in proces group
 	for(int i = 0; i < MAXJOBS; i++){
 		if(jobs[i].state == FG){
 			DPRINT("Job [%d] (%d) stopped\n"
