@@ -12,6 +12,9 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <errno.h>
+#include <stdarg.h>
+
+
 
 /* Misc manifest constants */
 #define MAXLINE    1024   /* max line size */
@@ -38,10 +41,26 @@
 #define DPRINT(fmt, ...) \
     do { \
         if (verbose) { \
-			printf("%s : ", __func__); \
-            printf(fmt, ##__VA_ARGS__); \
+			safe_printf("%s: ", __func__); \
+            safe_printf(fmt, ##__VA_ARGS__); \
         } \
     } while(0)
+
+
+void safe_printf(const char *format, ...) {
+    char buffer[1024];  // Adjust the size as needed
+    int length;
+
+    va_list args;
+    va_start(args, format);
+    length = vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+
+    if (length >= 0 && (size_t)length < sizeof(buffer)) {
+        // Write the formatted message to the standard output
+        write(STDOUT_FILENO, buffer, length);
+    }
+}
 
 /* Global variables */
 extern char **environ;      /* defined in libc */
@@ -57,10 +76,6 @@ struct job_t {              /* The job struct */
     char cmdline[MAXLINE];  /* command line */
 };
 struct job_t jobs[MAXJOBS]; /* The job list */
-
-
-volatile sig_atomic_t exitFlag = 0;
-
 /* End global variables */
 
 
@@ -145,7 +160,6 @@ int main(int argc, char **argv)
 
 	/* Read command line */
 	if (emit_prompt) {
-	    printf("%s", prompt);
 	    fflush(stdout);
 	}
 	if ((fgets(cmdline, MAXLINE, stdin) == NULL) && ferror(stdin))
@@ -184,6 +198,10 @@ void eval(char *cmdline)
 	pid_t pid;
 
 	strcpy(buf, cmdline);
+
+	if(strlen(buf) == 1)
+		return;
+
 	bg = parseline(buf, argv);
 
 	bin_funcnum = builtin_cmd(argv);
@@ -204,9 +222,17 @@ void eval(char *cmdline)
 			break;
 	}
 
+	sigset_t mask, prev_mask;
+
+	sigemptyset(&mask);
+	sigaddset(&mask, SIGCHLD);
+
+	sigprocmask(SIG_BLOCK, &mask, &prev_mask);
+
 	//Not the built in command 
 	//Then fork the program
     pid = fork();
+
 
     if (pid == -1) {
         // Fork is failed
@@ -222,14 +248,25 @@ void eval(char *cmdline)
         // When failed
         perror("execvp");
         exit(EXIT_FAILURE);
-    } else {
+    } 
+	else {
         // In parent process
+		
 
-        // Wait the child process is exit 
 		
 		//Foreground execute
 		if(!bg){
+			
 			addjob(jobs, pid, FG, cmdline); 
+
+
+			for (int i = 1; i < NSIG; i++) {
+				if (sigismember(&prev_mask, i)) {
+					printf("Signal %d is blocked.\n", i);
+				}
+			}
+
+			sigprocmask(SIG_SETMASK, &prev_mask, NULL);
 
 			waitfg(pid);
 		}
@@ -237,10 +274,19 @@ void eval(char *cmdline)
 		else{
 			int jid;
 
+			for (int i = 1; i < NSIG; i++) {
+				if (sigismember(&prev_mask, i)) {
+					printf("Signal %d is blocked.\n", i);
+				}
+			}
+			
 			jid = addjob(jobs, pid, BG, cmdline); 
+
+			sigprocmask(SIG_SETMASK, &prev_mask, NULL);
 
 			printf("[%d] (%d) %s", jid, pid, cmdline);
 		}
+
     }
 
     return;
@@ -333,15 +379,12 @@ void do_bgfg(char **argv)
  */
 void waitfg(pid_t pid)
 {
-	
 	do{
 		sleep(1);
 	}
 	while(getjobpid(jobs, pid));
 
 	DPRINT("Process (%d) no longer the fg process\n",  pid);
-
-
     return;
 }
 
@@ -367,18 +410,23 @@ void sigchld_handler(int sig)
 
 	if (child_pid > 0) {
 		int jid = pid2jid(child_pid);
-		if(deletejob(jobs, child_pid))
-			DPRINT("Job [%d] (%d) deleted\n", jid, child_pid);
 
-		if (WIFEXITED(status))
-			DPRINT("Job [%d] (%d) terminates OK (status %d)\n", jid, 
-					child_pid, WEXITSTATUS(status));
-		
-        if (WIFSIGNALED(status)) {
-            printf("Job [%d] (%d) terminated by signal: %d\n",
-					jid, child_pid, WTERMSIG(status));
-        } else if (WIFSTOPPED(status)) {
-            printf("Job [%d] (%d) stopped by signal: %d\n",
+		if(WIFEXITED(status) || WIFSIGNALED(status)){
+			if(deletejob(jobs, child_pid))
+				DPRINT("Job [%d] (%d) deleted\n", jid, child_pid);
+
+			if (WIFEXITED(status))
+				DPRINT("Job [%d] (%d) terminates OK (status %d)\n", jid, 
+						child_pid, WEXITSTATUS(status));
+			
+			if (WIFSIGNALED(status)) 
+				DPRINT("Job [%d] (%d) terminated by signal %d\n",
+						jid, child_pid, WTERMSIG(status));
+
+		}
+
+        if (WIFSTOPPED(status)) {
+            DPRINT("Job [%d] (%d) stopped by signal: %d\n",
 					jid, child_pid, WSTOPSIG(status));
 		}
 	}
@@ -395,8 +443,6 @@ void sigchld_handler(int sig)
  */
 void sigint_handler(int sig) 
 {
-	int check_delete = 0;
-
 	DPRINT("entering\n");
 	
 
@@ -408,8 +454,6 @@ void sigint_handler(int sig)
 			kill(jobs[i].pid, SIGINT);
 		}
 	}
-	if(check_delete)
-		exitFlag = sig;
 
 	DPRINT("exiting\n");
 
@@ -423,6 +467,18 @@ void sigint_handler(int sig)
  */
 void sigtstp_handler(int sig) 
 {
+	DPRINT("entring\n");
+
+	for(int i = 0; i < MAXJOBS; i++){
+		if(jobs[i].state == FG){
+			DPRINT("Job [%d] (%d) stopped\n"
+					,jobs[i].jid, jobs[i].pid);
+
+			kill(jobs[i].pid, SIGTSTP);
+		}
+	}
+
+	DPRINT("exiting\n");
     return;
 }
 
