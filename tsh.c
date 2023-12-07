@@ -41,8 +41,8 @@
 #define DPRINT(fmt, ...) \
     do { \
         if (verbose) { \
-			safe_printf("%s: ", __func__); \
-            safe_printf(fmt, ##__VA_ARGS__); \
+			printf("%s: ", __func__); \
+            printf(fmt, ##__VA_ARGS__); \
         } \
     } while(0)
 
@@ -160,6 +160,7 @@ int main(int argc, char **argv)
 
 	/* Read command line */
 	if (emit_prompt) {
+		printf("%s", prompt);
 	    fflush(stdout);
 	}
 	if ((fgets(cmdline, MAXLINE, stdin) == NULL) && ferror(stdin))
@@ -229,11 +230,10 @@ void eval(char *cmdline)
 
 	sigprocmask(SIG_BLOCK, &mask, &prev_mask);
 
+
 	//Not the built in command 
 	//Then fork the program
     pid = fork();
-
-
     if (pid == -1) {
         // Fork is failed
         perror("fork");
@@ -242,6 +242,7 @@ void eval(char *cmdline)
     if (pid == 0) {
         // In child process
 
+		setpgid(0, 0);
         // Create new process using execvp
         execvp(argv[0], argv);
 
@@ -252,19 +253,10 @@ void eval(char *cmdline)
 	else {
         // In parent process
 		
-
-		
 		//Foreground execute
 		if(!bg){
 			
 			addjob(jobs, pid, FG, cmdline); 
-
-
-			for (int i = 1; i < NSIG; i++) {
-				if (sigismember(&prev_mask, i)) {
-					printf("Signal %d is blocked.\n", i);
-				}
-			}
 
 			sigprocmask(SIG_SETMASK, &prev_mask, NULL);
 
@@ -273,12 +265,6 @@ void eval(char *cmdline)
 		//Background execute
 		else{
 			int jid;
-
-			for (int i = 1; i < NSIG; i++) {
-				if (sigismember(&prev_mask, i)) {
-					printf("Signal %d is blocked.\n", i);
-				}
-			}
 			
 			jid = addjob(jobs, pid, BG, cmdline); 
 
@@ -355,12 +341,10 @@ int parseline(const char *cmdline, char **argv)
  */
 int builtin_cmd(char **argv) 
 {
-	if(argv[1] == NULL){
-		char *builtinp[4] = {"quit", "fg", "bg", "jobs"};
-		for(int i = 0; i < 4; i++){
-			if(strcmp(builtinp[i], argv[0]) == 0)
-				return i+1;
-		}
+	char *builtinp[4] = {"quit", "fg", "bg", "jobs"};
+	for(int i = 0; i < 4; i++){
+		if(strcmp(builtinp[i], argv[0]) == 0)
+			return i+1;
 	}
 
     return 0;     /* not a builtin command */
@@ -371,6 +355,35 @@ int builtin_cmd(char **argv)
  */
 void do_bgfg(char **argv) 
 {
+	struct job_t *job;
+
+	if(argv[1]==NULL){
+		printf("bg command requires PID or \046jobid argument\n");
+		return;
+	}
+
+	//JID
+	else if(argv[1][0] == '%')
+		job = getjobjid(jobs, atoi(&argv[1][1]));
+	//PID
+	else
+		job = getjobpid(jobs, atoi(argv[1]));
+
+	if(job == NULL){
+		printf("%s: No such job\n", argv[1]);
+		return;
+	}
+	
+
+	if(strcmp(argv[0], "bg") == 0){
+		printf("[%d] (%d) %s", job->pid, job->jid, job->cmdline);
+		kill(-(job->pid), SIGCONT);
+		job->state = BG;
+	}
+	else{
+		kill(-(job->pid), SIGCONT);
+		job->state = FG;
+	}
     return;
 }
 
@@ -379,12 +392,17 @@ void do_bgfg(char **argv)
  */
 void waitfg(pid_t pid)
 {
+	struct job_t *job;
 	do{
 		sleep(1);
+		job = getjobpid(jobs, pid);
+		if(job == NULL)
+			break;
 	}
-	while(getjobpid(jobs, pid));
+	while((job->state) == FG);
 
 	DPRINT("Process (%d) no longer the fg process\n",  pid);
+
     return;
 }
 
@@ -426,8 +444,16 @@ void sigchld_handler(int sig)
 		}
 
         if (WIFSTOPPED(status)) {
-            DPRINT("Job [%d] (%d) stopped by signal: %d\n",
-					jid, child_pid, WSTOPSIG(status));
+			struct job_t *job;
+			job = getjobpid(jobs, child_pid);
+
+			if(job){
+				job->state = ST;
+				printf("Job [%d] (%d) stopped by signal %d\n",
+						jid, child_pid, WSTOPSIG(status));
+			}
+			else
+				printf("Job is not exist\n");
 		}
 	}
 
@@ -451,7 +477,7 @@ void sigint_handler(int sig)
 			DPRINT("Job [%d] (%d) killed\n"
 					,jobs[i].jid, jobs[i].pid);
 
-			kill(jobs[i].pid, SIGINT);
+			kill(-jobs[i].pid, SIGINT);
 		}
 	}
 
@@ -474,7 +500,7 @@ void sigtstp_handler(int sig)
 			DPRINT("Job [%d] (%d) stopped\n"
 					,jobs[i].jid, jobs[i].pid);
 
-			kill(jobs[i].pid, SIGTSTP);
+			kill(-jobs[i].pid, SIGTSTP);
 		}
 	}
 
@@ -616,25 +642,27 @@ void listjobs(struct job_t *jobs)
     int i;
     
     for (i = 0; i < MAXJOBS; i++) {
-	if ((jobs[i].pid != 0) && (jobs[i].state == BG)) {
-	    printf("[%d] (%d) ", jobs[i].jid, jobs[i].pid);
-//	    switch (jobs[i].state) {
-//		case BG: 
-		    printf("Running ");
-			printf("%s", jobs[i].cmdline);
-//		    break;
-//		case FG: 
-//		    printf("Foreground ");
-//		    break;
-//		case ST: 
-//		    printf("Stopped ");
-//		    break;
-//	    default:
-//		    printf("listjobs: Internal error: job[%d].state=%d ", 
-//			   i, jobs[i].state);
-//    }
-//      printf("%s", jobs[i].cmdline);
-	}
+		if ((jobs[i].pid != 0)) {
+			printf("[%d] (%d) ", jobs[i].jid, jobs[i].pid);
+				switch (jobs[i].state) {
+				case BG: 
+					printf("Running ");
+					printf("%s", jobs[i].cmdline);
+					break;
+		//		case FG: 
+		//		    printf("Foreground ");
+		//		    break;
+				case ST: 
+					printf("Stopped ");
+					printf("%s", jobs[i].cmdline);
+					break;
+					break;
+		//	    default:
+		//		    printf("listjobs: Internal error: job[%d].state=%d ", 
+		//			   i, jobs[i].state);
+				}
+	//      printf("%s", jobs[i].cmdline);
+		}
     }
 }
 /******************************
