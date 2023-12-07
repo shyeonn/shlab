@@ -13,6 +13,8 @@
 #include <sys/wait.h>
 #include <errno.h>
 #include <stdarg.h>
+#include <sys/stat.h>
+
 
 
 
@@ -198,6 +200,11 @@ void eval(char *cmdline)
 	int bg;
 	pid_t pid;
 
+	sigset_t mask, prev_mask;
+
+    struct stat s_buffer;   
+    int exist;
+
 	strcpy(buf, cmdline);
 
 	if(strlen(buf) == 1)
@@ -206,7 +213,6 @@ void eval(char *cmdline)
 	bg = parseline(buf, argv);
 
 	bin_funcnum = builtin_cmd(argv);
-
 
 	//When the cmd line command is built in command
 	switch(bin_funcnum){
@@ -223,11 +229,19 @@ void eval(char *cmdline)
 			break;
 	}
 
-	sigset_t mask, prev_mask;
+	//Check the input cmdline file is exist
+    exist = stat(argv[0], &s_buffer);
+    if(exist != 0){
+        printf("%s: Command not found\n", argv[0]);
+		return;
+	}
 
+
+	//Set the signal mask
 	sigemptyset(&mask);
 	sigaddset(&mask, SIGCHLD);
 
+	//Block the SIGCHLD signal
 	sigprocmask(SIG_BLOCK, &mask, &prev_mask);
 
 
@@ -358,25 +372,42 @@ void do_bgfg(char **argv)
 	struct job_t *job;
 
 	if(argv[1]==NULL){
-		printf("bg command requires PID or \046jobid argument\n");
+		printf("%s command requires PID or %%jobid argument\n",argv[0]);
 		return;
 	}
-
 	//JID
-	else if(argv[1][0] == '%')
-		job = getjobjid(jobs, atoi(&argv[1][1]));
+	else if(argv[1][0] == '%'){
+		char *endptr;
+		int jid = strtol(&argv[1][1], &endptr, 10);
+		if(endptr == &argv[1][1]){
+			printf("%s: argument must be a PID or %%jobid\n", argv[0]);
+			return;
+		}
+		job = getjobjid(jobs, jid);
+		if(job == NULL){
+			printf("%s: No such job\n", argv[1]);
+			return;
+		}
+	}
 	//PID
-	else
-		job = getjobpid(jobs, atoi(argv[1]));
+	else{
+		char *endptr;
+		int pid = strtol(argv[1], &endptr, 10);
+		if(endptr == argv[1]){
+			printf("%s: argument must be a PID or %%jobid\n", argv[0]);
+			return;
+		}
 
-	if(job == NULL){
-		printf("%s: No such job\n", argv[1]);
-		return;
+		job = getjobpid(jobs, pid);
+		if(job == NULL){
+			printf("(%s): No such process\n", argv[1]);
+			return;
+		}
 	}
 	
 
 	if(strcmp(argv[0], "bg") == 0){
-		printf("[%d] (%d) %s", job->pid, job->jid, job->cmdline);
+		printf("[%d] (%d) %s", job->jid, job->pid, job->cmdline);
 		kill(-(job->pid), SIGCONT);
 		job->state = BG;
 	}
@@ -439,7 +470,7 @@ void sigchld_handler(int sig)
 						child_pid, WEXITSTATUS(status));
 			
 			if (WIFSIGNALED(status)) 
-				DPRINT("Job [%d] (%d) terminated by signal %d\n",
+				printf("Job [%d] (%d) terminated by signal %d\n",
 						jid, child_pid, WTERMSIG(status));
 
 		}
