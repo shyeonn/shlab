@@ -381,8 +381,9 @@ void do_bgfg(char **argv)
 		job->state = BG;
 	}
 	else{
-		kill(-(job->pid), SIGCONT);
 		job->state = FG;
+		kill(-(job->pid), SIGCONT);
+		waitfg(job->pid);
 	}
     return;
 }
@@ -643,9 +644,9 @@ void listjobs(struct job_t *jobs)
     
     for (i = 0; i < MAXJOBS; i++) {
 		if ((jobs[i].pid != 0)) {
-			printf("[%d] (%d) ", jobs[i].jid, jobs[i].pid);
 				switch (jobs[i].state) {
 				case BG: 
+					printf("[%d] (%d) ", jobs[i].jid, jobs[i].pid);
 					printf("Running ");
 					printf("%s", jobs[i].cmdline);
 					break;
@@ -653,13 +654,13 @@ void listjobs(struct job_t *jobs)
 		//		    printf("Foreground ");
 		//		    break;
 				case ST: 
+					printf("[%d] (%d) ", jobs[i].jid, jobs[i].pid);
 					printf("Stopped ");
 					printf("%s", jobs[i].cmdline);
 					break;
-					break;
-		//	    default:
-		//		    printf("listjobs: Internal error: job[%d].state=%d ", 
-		//			   i, jobs[i].state);
+//			    default:
+//				    printf("listjobs: Internal error: job[%d].state=%d\n", 
+//					   i, jobs[i].state);
 				}
 	//      printf("%s", jobs[i].cmdline);
 		}
